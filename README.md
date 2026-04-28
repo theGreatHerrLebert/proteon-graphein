@@ -7,7 +7,10 @@ energies as node and graph attributes on Graphein protein graphs.
 
 ## Status
 
-Pre-release (v0). Residue-level graph happy path only. No PyPI release yet.
+Pre-release (v0). Residue-level graph happy path with explicit
+`(chain_id, residue_number, insertion_code)` key matching against
+proteon's residue list. Smoke-tested against a Graphein-built graph
+from `1crn.pdb`. No PyPI release yet.
 
 ## Install (development)
 
@@ -54,12 +57,14 @@ user opt into proteon features in one call.
 
 ## Roadmap
 
-- v0.0.1 (current): residue-level graph, SASA + RSA + DSSP + total energy.
-- v0.1.x: explicit (chain_id, residue_number, insertion_code) matching to
-  remove the sorted-iteration assumption.
-- v0.2.x: per-residue energy decomposition as node attributes; atom-level
+- v0.0.1 (current): residue-level graph, SASA + RSA + DSSP + total energy,
+  explicit `(chain_id, residue_number, insertion_code)` key matching, real
+  Graphein integration test against `1crn.pdb`.
+- v0.1.x: per-residue energy decomposition as node attributes; atom-level
   graph support.
-- v0.3.x: optional batch helper for many graphs in one proteon call.
+- v0.2.x: optional batch helper for many graphs in one proteon call.
+- v0.3.x: PyTorch Geometric `transform` adapter so the same features land
+  inside a PyG `InMemoryDataset` pipeline without going through Graphein.
 
 ## License
 
