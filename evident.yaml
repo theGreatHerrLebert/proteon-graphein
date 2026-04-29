@@ -1,0 +1,67 @@
+version: 0.1
+project: proteon-graphein
+description: >
+  EVIDENT claim manifest for the proteon-graphein integration adapter.
+  Conforms to the EVIDENT workflow contract (claim -> trust strategy ->
+  oracle -> tolerance -> command -> artifact -> assumptions + failure modes)
+  defined at github.com/theGreatHerrLebert/evident.
+
+claims:
+  - id: proteon-graphein-residue-feature-parity
+    title: Graphein node and graph attributes equal direct proteon API outputs
+    case: CASE.md
+    source: src
+    tier: ci
+    trust_strategy:
+      - validation
+    claim: >
+      For every Graphein node matched by add_proteon_features, the attached
+      values (residue_sasa, rsa, dssp) and the graph-level proteon_energy dict
+      are exactly equal to what proteon would return when called directly on
+      the same PDB. The adapter must not lose, reorder, round, or rebadge
+      values during residue-key matching.
+    evidence:
+      oracle:
+        - proteon (direct compute_proteon_features call, same process)
+      tolerance: >
+        Exact equality for floats; string equality for DSSP codes; NaN-aware
+        for RSA. Same backend, same process, no recomputation -- any drift
+        means the adapter mutated a value in transport.
+      command: >
+        /scratch/TMAlign/proteon/.venv/bin/python -m pytest
+        tests/test_parity.py -v
+      artifact: pytest exit code and captured failure diffs (stdout)
+    assumptions:
+      - The adapter shares a process and proteon version with the oracle;
+        proteon version skew is out of scope for this manifest.
+      - Graphein's default residue-level node attributes expose chain_id and
+        residue_number; insertion_code is normalized to the empty string when
+        absent.
+      - Test fixtures live at /scratch/TMAlign/proteon/test-pdbs/ and tests
+        skip (not fail) when those files are missing.
+    failure_modes:
+      - Graphein silently changes its node-id schema, breaking the residue-key
+        match while leaving the parity test trivially passing. Mitigation
+        n_checked > 0 guard in test_parity_residue_features_match_direct_proteon_call.
+      - proteon adds a new energy component that the integration test does not
+        explicitly check. Mitigation set-equality of energy dict keys in
+        test_parity_graph_energy_matches_direct_proteon_call.
+      - HETATM residues acquire DSSP codes via a Graphein/proteon residue
+        classification disagreement. Mitigation
+        test_parity_hetatm_residues_dssp_only_for_aa on the 1ake fixture.
+
+# Deferred claims are tracked separately so the validated manifest never
+# carries placeholder evidence (Validation Theater anti-pattern). Each entry
+# is promoted into `claims:` only once it has real oracle, tolerance, command,
+# and artifact.
+deferred_claims:
+  - id: proteon-graphein-feature-pack-ablation
+    title: Proteon feature pack improves geometric DL on a held-out fold
+    intended_tier: research
+    blockers:
+      - Pre-declared tolerance and decision rule must be written before a
+        single training run starts.
+      - Demo notebook + ProteinShake split fix not yet drafted.
+    notes: >
+      Per feedback_framework_agnostic_export, this lives in a separate
+      notebook/repo, not in the proteon-graphein core package.
