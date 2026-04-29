@@ -66,6 +66,28 @@ user opt into proteon features in one call.
 - v0.3.x: PyTorch Geometric `transform` adapter so the same features land
   inside a PyG `InMemoryDataset` pipeline without going through Graphein.
 
+## Trust
+
+This package follows the
+[EVIDENT](https://github.com/theGreatHerrLebert/evident) claim-based evidence
+workflow. Its current trust claim is documented in
+[`evident.yaml`](evident.yaml) and explained in [`CASE.md`](CASE.md):
+
+- **Parity claim** (tier `ci`): every value the adapter attaches to a
+  Graphein node is exactly equal to what `proteon` returned for that residue.
+  Reproduced by `pytest tests/test_parity.py`.
+- The downstream science claim (proteon features improve geometric-DL
+  baselines on a held-out fold) is tracked under `deferred_claims:` and will
+  only move into `claims:` once a tolerance and decision rule are pre-declared
+  — declaring it earlier would be the [Validation Theater](https://github.com/theGreatHerrLebert/evident/blob/main/anti-patterns/README.md)
+  anti-pattern.
+
+To validate the manifest structurally:
+
+```bash
+python /path/to/evident/workflow/validate_manifest.py evident.yaml
+```
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
