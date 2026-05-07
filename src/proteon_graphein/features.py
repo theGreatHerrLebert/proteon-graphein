@@ -98,10 +98,29 @@ def _atom_key(
 
 
 def _detect_granularity(graph: nx.Graph) -> Literal["residue", "atom"]:
-    """Sniff Graphein granularity by looking for ``atom_type`` on any node."""
+    """Detect Graphein granularity.
+
+    Primary signal: ``graph.graph["config"].granularity`` ("atom" / "centroids"
+    means atom-level; an atom name like "CA" means residue-level).
+
+    Fallback for hand-built graphs without a Graphein config: a residue
+    holding more than one node is atom-level. Default is residue.
+    """
+    config = graph.graph.get("config")
+    granularity = getattr(config, "granularity", None)
+    if isinstance(granularity, str):
+        return "atom" if granularity in ("atom", "centroids") else "residue"
+
+    seen: set[tuple[str, int, str]] = set()
     for _, data in graph.nodes(data=True):
-        if "atom_type" in data:
+        rkey = _residue_key(
+            data.get("chain_id"),
+            data.get("residue_number"),
+            data.get("insertion_code") or data.get("insertion"),
+        )
+        if rkey in seen:
             return "atom"
+        seen.add(rkey)
     return "residue"
 
 

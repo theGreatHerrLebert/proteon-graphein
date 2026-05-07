@@ -60,14 +60,20 @@ def _residue_index_lookups(structure):
 @pytest.mark.skipif(not TEST_PDB.exists(), reason="1crn.pdb fixture not available")
 def test_parity_residue_features_match_direct_proteon_call() -> None:
     """Every attached node value must equal the corresponding direct-API value."""
-    feats = compute_proteon_features(TEST_PDB)
+    feats = compute_proteon_features(
+        TEST_PDB, hbond_count=True, dihedrals=True
+    )
     res_idx, aa_idx = _residue_index_lookups(feats["structure"])
 
     graph = _build_graph(TEST_PDB)
-    graph = add_proteon_features(graph, TEST_PDB)
+    graph = add_proteon_features(
+        graph, TEST_PDB, hbond_count=True, dihedrals=True
+    )
 
     n_checked_sasa = 0
     n_checked_dssp = 0
+    n_checked_hbond = 0
+    n_checked_dihedral = 0
     for node_id, data in graph.nodes(data=True):
         key = _residue_key(
             data.get("chain_id"),
@@ -105,8 +111,38 @@ def test_parity_residue_features_match_direct_proteon_call() -> None:
             )
             n_checked_dssp += 1
 
+        if "hbond_count" in data:
+            assert key in aa_idx, f"node {node_id} carries hbond_count but residue is non-AA"
+            j = aa_idx[key]
+            expected_hb = int(feats["hbond_count"][j])
+            assert data["hbond_count"] == expected_hb, (
+                f"hbond_count mismatch at {node_id}: "
+                f"graph={data['hbond_count']!r} oracle={expected_hb!r}"
+            )
+            n_checked_hbond += 1
+
+        # Dihedrals: attached only when proteon's value is non-NaN.
+        for name in ("phi", "psi", "omega"):
+            j = aa_idx.get(key)
+            if j is None:
+                assert name not in data, f"node {node_id} carries {name} but residue is non-AA"
+                continue
+            expected = float(feats[name][j])
+            if math.isnan(expected):
+                assert name not in data, (
+                    f"{name} NaN-parity broken at {node_id}: graph attached nan"
+                )
+            elif name in data:
+                assert data[name] == expected, (
+                    f"{name} mismatch at {node_id}: "
+                    f"graph={data[name]!r} oracle={expected!r}"
+                )
+                n_checked_dihedral += 1
+
     assert n_checked_sasa > 0, "no SASA values were checked -- adapter or fixture is broken"
     assert n_checked_dssp > 0, "no DSSP codes were checked -- adapter or fixture is broken"
+    assert n_checked_hbond > 0, "no hbond_count values were checked -- adapter or fixture is broken"
+    assert n_checked_dihedral > 0, "no dihedral values were checked -- adapter or fixture is broken"
 
 
 @pytest.mark.skipif(not TEST_PDB.exists(), reason="1crn.pdb fixture not available")
@@ -166,7 +202,7 @@ def test_parity_atom_level_features_match_direct_proteon_call() -> None:
     n_broadcast_sasa = 0
     n_broadcast_dssp = 0
     n_broadcast_hbond = 0
-    n_dihedral = 0
+    n_dihedral = {"phi": 0, "psi": 0, "omega": 0}
     for node_id, data in graph.nodes(data=True):
         rkey = _residue_key(
             data.get("chain_id"),
@@ -204,16 +240,29 @@ def test_parity_atom_level_features_match_direct_proteon_call() -> None:
             j = aa_idx[rkey]
             assert data["hbond_count"] == int(feats["hbond_count"][j])
             n_broadcast_hbond += 1
-        if "phi" in data:
-            j = aa_idx[rkey]
-            assert data["phi"] == float(feats["phi"][j])
-            n_dihedral += 1
+        for name in ("phi", "psi", "omega"):
+            j = aa_idx.get(rkey)
+            if j is None:
+                assert name not in data
+                continue
+            expected = float(feats[name][j])
+            if math.isnan(expected):
+                assert name not in data, (
+                    f"{name} NaN-parity broken at atom {node_id}"
+                )
+            elif name in data:
+                assert data[name] == expected, (
+                    f"{name} mismatch at atom {node_id}: "
+                    f"graph={data[name]!r} oracle={expected!r}"
+                )
+                n_dihedral[name] += 1
 
     assert n_atom_sasa > 0, "no atoms received per-atom SASA — adapter or fixture broken"
     assert n_broadcast_sasa > 0, "no atoms received broadcast residue_sasa"
     assert n_broadcast_dssp > 0, "no atoms received broadcast DSSP"
     assert n_broadcast_hbond > 0, "no atoms received broadcast hbond_count"
-    assert n_dihedral > 0, "no atoms received broadcast phi"
+    for name, count in n_dihedral.items():
+        assert count > 0, f"no atoms received broadcast {name}"
 
 
 @pytest.mark.skipif(not TEST_PDB_HET.exists(), reason="1ake.pdb fixture not available")

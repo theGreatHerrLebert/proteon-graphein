@@ -177,6 +177,27 @@ def test_add_features_residue_level_with_extras() -> None:
 
 
 @pytest.mark.skipif(not TEST_PDB.exists(), reason="1crn.pdb fixture not available")
+def test_add_features_residue_default_does_not_attach_atom_features() -> None:
+    """Default Graphein residue graph has atom_type='CA' on each node.
+
+    The granularity detector must not mistake that for an atom-level graph
+    and attach atom_sasa / charge / is_backbone / hetero to residue nodes.
+    """
+    pytest.importorskip("graphein")
+    import graphein.protein as gp
+    from graphein.protein.config import ProteinGraphConfig
+
+    graph = gp.construct_graph(config=ProteinGraphConfig(), path=str(TEST_PDB))
+    graph = add_proteon_features(graph, TEST_PDB, energy=False)
+
+    for node_id, data in graph.nodes(data=True):
+        for atom_only in ("atom_sasa", "charge", "is_backbone", "hetero"):
+            assert atom_only not in data, (
+                f"residue-level node {node_id} got atom-only attr {atom_only!r}"
+            )
+
+
+@pytest.mark.skipif(not TEST_PDB.exists(), reason="1crn.pdb fixture not available")
 def test_add_features_atom_level_auto_detect() -> None:
     """Atom-level Graphein graphs receive per-atom and broadcast residue features."""
     pytest.importorskip("graphein")
