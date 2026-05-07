@@ -113,10 +113,13 @@ user opt into proteon features in one call.
   in one parallel proteon call via batch primitives (added upstream in
   proteon for this release). Strict mode only. Mixed-granularity batches
   supported. Batch-equals-loop parity claim added to the EVIDENT manifest.
-- v0.3.x: PyTorch Geometric `transform` adapter so the same features land
-  inside a PyG `InMemoryDataset` pipeline without going through Graphein.
 - v0.2.x follow-ups: tolerant batch loading (skip + return success
   indices); accepting pre-loaded `proteon.Structure` objects directly.
+
+PyTorch Geometric users: the `Data`-tensor adapter now lives in the sibling
+package [proteon-pyg](https://github.com/theGreatHerrLebert/proteon-pyg) so
+PyG users don't pay for the graphein dependency tree. Both packages share
+proteon as their oracle and target exact-equality parity.
 - Deferred: per-residue / per-atom energy decomposition. Blocked on a
   proteon API for residue-resolved energy components — `compute_energy`
   currently returns whole-structure totals only.
