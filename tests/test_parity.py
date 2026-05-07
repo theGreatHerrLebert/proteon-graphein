@@ -269,7 +269,10 @@ def test_parity_atom_level_features_match_direct_proteon_call() -> None:
         assert count > 0, f"no atoms received broadcast {name}"
 
 
-@pytest.mark.skipif(not TEST_PDB.exists(), reason="1crn.pdb fixture not available")
+@pytest.mark.skipif(
+    not (TEST_PDB.exists() and TEST_PDB_HET.exists()),
+    reason="1crn.pdb and/or 1ake.pdb fixture not available",
+)
 def test_parity_batch_helper_matches_single_call_loop() -> None:
     """add_proteon_features_batch(graphs, paths)[i] must be exact-equal to
     add_proteon_features(graphs[i], paths[i]).

@@ -15,7 +15,10 @@ classifiers = [
     "Development Status :: 3 - Alpha",
 ]
 dependencies = [
-    "proteon",
+    # v0.2.0 of proteon-graphein requires the batch_residue_sasa,
+    # batch_relative_sasa, batch_atom_sasa, batch_hbond_count, and
+    # batch_compute_energy primitives added in proteon 0.2.0.
+    "proteon>=0.2.0",
     "numpy",
 ]
 

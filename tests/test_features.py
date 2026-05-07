@@ -293,7 +293,10 @@ def test_add_features_atom_level_skip_atom_features() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(not TEST_PDB.exists(), reason="1crn.pdb fixture not available")
+@pytest.mark.skipif(
+    not (TEST_PDB.exists() and TEST_PDB_HET.exists()),
+    reason="1crn.pdb and/or 1ake.pdb fixture not available",
+)
 def test_compute_features_batch_matches_serial() -> None:
     """Batch feature dicts must equal a Python loop of single calls."""
     paths = [TEST_PDB, TEST_PDB_HET, TEST_PDB]
