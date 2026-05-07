@@ -16,3 +16,6 @@ htmlcov/
 .idea/
 .vscode/
 .DS_Store
+
+# Notebook checkpoints
+notebooks/.ipynb_checkpoints/
