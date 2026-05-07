@@ -100,8 +100,9 @@ def _atom_key(
 def _detect_granularity(graph: nx.Graph) -> Literal["residue", "atom"]:
     """Detect Graphein granularity.
 
-    Primary signal: ``graph.graph["config"].granularity`` ("atom" / "centroids"
-    means atom-level; an atom name like "CA" means residue-level).
+    Primary signal: ``graph.graph["config"].granularity``. Only "atom" is
+    atom-level; "centroids" is one node per residue (residue-level), and any
+    atom-name value (e.g. "CA") is also residue-level.
 
     Fallback for hand-built graphs without a Graphein config: a residue
     holding more than one node is atom-level. Default is residue.
@@ -109,7 +110,7 @@ def _detect_granularity(graph: nx.Graph) -> Literal["residue", "atom"]:
     config = graph.graph.get("config")
     granularity = getattr(config, "granularity", None)
     if isinstance(granularity, str):
-        return "atom" if granularity in ("atom", "centroids") else "residue"
+        return "atom" if granularity == "atom" else "residue"
 
     seen: set[tuple[str, int, str]] = set()
     for _, data in graph.nodes(data=True):
@@ -318,7 +319,14 @@ def add_proteon_features(
         if attached_any:
             n_attached += 1
 
-    if n_attached == 0 and graph.number_of_nodes() > 0:
+    requested_node_features = sasa or dssp or hbond_count or dihedrals or (
+        granularity == "atom" and atom_features
+    )
+    if (
+        requested_node_features
+        and n_attached == 0
+        and graph.number_of_nodes() > 0
+    ):
         raise ValueError(
             "No graph nodes matched proteon residues by "
             "(chain_id, residue_number, insertion_code). "

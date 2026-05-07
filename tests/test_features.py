@@ -177,6 +177,49 @@ def test_add_features_residue_level_with_extras() -> None:
 
 
 @pytest.mark.skipif(not TEST_PDB.exists(), reason="1crn.pdb fixture not available")
+def test_add_features_centroid_graph_is_residue_level() -> None:
+    """Graphein 'centroids' granularity is one node per residue, not atom-level.
+
+    The detector must classify it as residue and not attach atom-only
+    attributes (atom_sasa / charge / is_backbone / hetero).
+    """
+    pytest.importorskip("graphein")
+    import graphein.protein as gp
+    from graphein.protein.config import ProteinGraphConfig
+
+    graph = gp.construct_graph(
+        config=ProteinGraphConfig(granularity="centroids"), path=str(TEST_PDB)
+    )
+    graph = add_proteon_features(graph, TEST_PDB, energy=False)
+
+    for node_id, data in graph.nodes(data=True):
+        for atom_only in ("atom_sasa", "charge", "is_backbone", "hetero"):
+            assert atom_only not in data, (
+                f"centroid node {node_id} got atom-only attr {atom_only!r}"
+            )
+        assert "residue_sasa" in data, f"centroid node {node_id} missing residue_sasa"
+
+
+@pytest.mark.skipif(not TEST_PDB.exists(), reason="1crn.pdb fixture not available")
+def test_add_features_energy_only_does_not_raise() -> None:
+    """Energy-only mode (no node features) must not trip the no-match guard."""
+    pytest.importorskip("graphein")
+    import graphein.protein as gp
+    from graphein.protein.config import ProteinGraphConfig
+
+    graph = gp.construct_graph(config=ProteinGraphConfig(), path=str(TEST_PDB))
+    graph = add_proteon_features(
+        graph, TEST_PDB, sasa=False, dssp=False, energy=True
+    )
+
+    assert "proteon_energy" in graph.graph
+    assert "proteon_ff" in graph.graph
+    sample = next(iter(graph.nodes(data=True)))[1]
+    assert "residue_sasa" not in sample
+    assert "dssp" not in sample
+
+
+@pytest.mark.skipif(not TEST_PDB.exists(), reason="1crn.pdb fixture not available")
 def test_add_features_residue_default_does_not_attach_atom_features() -> None:
     """Default Graphein residue graph has atom_type='CA' on each node.
 
