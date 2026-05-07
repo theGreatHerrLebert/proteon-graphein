@@ -62,6 +62,38 @@ def test_compute_features_handles_hetatm() -> None:
     assert n_sasa > n_dssp, "1ake has waters/ligand — SASA should exceed DSSP count"
 
 
+@pytest.mark.skipif(not TEST_PDB.exists(), reason="1crn.pdb fixture not available")
+def test_compute_features_atom_sasa_flag() -> None:
+    """atom_sasa is opt-in and one entry per atom in the structure."""
+    feats = compute_proteon_features(
+        TEST_PDB, sasa=False, dssp=False, energy=False, atom_sasa=True
+    )
+    assert "atom_sasa" in feats
+    assert len(feats["atom_sasa"]) == feats["structure"].atom_count
+
+
+@pytest.mark.skipif(not TEST_PDB.exists(), reason="1crn.pdb fixture not available")
+def test_compute_features_hbond_count_flag() -> None:
+    feats = compute_proteon_features(
+        TEST_PDB, sasa=False, dssp=False, energy=False, hbond_count=True
+    )
+    n_aa = sum(1 for r in feats["structure"].residues if r.is_amino_acid)
+    assert "hbond_count" in feats
+    assert len(feats["hbond_count"]) == n_aa
+
+
+@pytest.mark.skipif(not TEST_PDB.exists(), reason="1crn.pdb fixture not available")
+def test_compute_features_dihedrals_flag() -> None:
+    feats = compute_proteon_features(
+        TEST_PDB, sasa=False, dssp=False, energy=False, dihedrals=True
+    )
+    n_aa = sum(1 for r in feats["structure"].residues if r.is_amino_acid)
+    assert {"phi", "psi", "omega"}.issubset(feats)
+    assert len(feats["phi"]) == n_aa
+    assert len(feats["psi"]) == n_aa
+    assert len(feats["omega"]) == n_aa
+
+
 # ---------------------------------------------------------------------------
 # _residue_key
 # ---------------------------------------------------------------------------
@@ -121,6 +153,73 @@ def test_add_features_selective_flags() -> None:
     assert "residue_sasa" in sample
     assert "rsa" in sample
     assert "dssp" not in sample
+
+
+@pytest.mark.skipif(not TEST_PDB.exists(), reason="1crn.pdb fixture not available")
+def test_add_features_residue_level_with_extras() -> None:
+    """hbond_count + dihedrals attach to AA residue nodes (NaN-aware on termini)."""
+    pytest.importorskip("graphein")
+    import graphein.protein as gp
+    from graphein.protein.config import ProteinGraphConfig
+
+    graph = gp.construct_graph(config=ProteinGraphConfig(), path=str(TEST_PDB))
+    graph = add_proteon_features(
+        graph, TEST_PDB, hbond_count=True, dihedrals=True, energy=False
+    )
+
+    n_hbond = sum(1 for _, d in graph.nodes(data=True) if "hbond_count" in d)
+    n_phi = sum(1 for _, d in graph.nodes(data=True) if "phi" in d)
+    n_psi = sum(1 for _, d in graph.nodes(data=True) if "psi" in d)
+    assert n_hbond > 0
+    # phi and psi each skip one terminus, so they should be one short of n_hbond.
+    assert n_phi == n_hbond - 1, "phi should be NaN-skipped at N-terminus"
+    assert n_psi == n_hbond - 1, "psi should be NaN-skipped at C-terminus"
+
+
+@pytest.mark.skipif(not TEST_PDB.exists(), reason="1crn.pdb fixture not available")
+def test_add_features_atom_level_auto_detect() -> None:
+    """Atom-level Graphein graphs receive per-atom and broadcast residue features."""
+    pytest.importorskip("graphein")
+    import graphein.protein as gp
+    from graphein.protein.config import ProteinGraphConfig
+
+    config = ProteinGraphConfig(granularity="atom")
+    graph = gp.construct_graph(config=config, path=str(TEST_PDB))
+    graph = add_proteon_features(
+        graph, TEST_PDB, hbond_count=True, dihedrals=True, energy=True
+    )
+
+    sample = next(iter(graph.nodes(data=True)))[1]
+    # per-atom
+    assert "atom_sasa" in sample
+    assert isinstance(sample["atom_sasa"], float)
+    assert "charge" in sample
+    assert "is_backbone" in sample
+    assert "hetero" in sample
+    # broadcast residue features
+    assert "residue_sasa" in sample
+    assert "dssp" in sample
+    assert "hbond_count" in sample
+
+
+@pytest.mark.skipif(not TEST_PDB.exists(), reason="1crn.pdb fixture not available")
+def test_add_features_atom_level_skip_atom_features() -> None:
+    """atom_features=False keeps residue broadcasts but drops per-atom values."""
+    pytest.importorskip("graphein")
+    import graphein.protein as gp
+    from graphein.protein.config import ProteinGraphConfig
+
+    config = ProteinGraphConfig(granularity="atom")
+    graph = gp.construct_graph(config=config, path=str(TEST_PDB))
+    graph = add_proteon_features(
+        graph, TEST_PDB, atom_features=False, energy=False
+    )
+
+    sample = next(iter(graph.nodes(data=True)))[1]
+    assert "atom_sasa" not in sample
+    assert "charge" not in sample
+    assert "residue_sasa" in sample
+    assert "dssp" in sample
 
 
 @pytest.mark.skipif(not TEST_PDB.exists(), reason="1crn.pdb fixture not available")

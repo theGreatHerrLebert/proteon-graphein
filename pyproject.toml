@@ -1,6 +1,6 @@
 [project]
 name = "proteon-graphein"
-version = "0.0.1"
+version = "0.1.0"
 description = "Proteon structural features (SASA, DSSP, CHARMM19+EEF1 / AMBER96 energies) as Graphein protein-graph attributes"
 readme = "README.md"
 license = { text = "MIT" }

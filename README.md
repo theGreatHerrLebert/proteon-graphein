@@ -2,15 +2,18 @@
 
 [Graphein](https://github.com/a-r-j/graphein) integration for
 [proteon](https://github.com/theGreatHerrLebert/proteon) — adds per-residue
-SASA, relative SASA, 8-state DSSP, and CHARMM19+EEF1 / AMBER96 force-field
-energies as node and graph attributes on Graphein protein graphs.
+SASA, relative SASA, 8-state DSSP, backbone H-bond counts, phi/psi/omega
+dihedrals, per-atom SASA + atom metadata, and CHARMM19+EEF1 / AMBER96
+force-field energies as node and graph attributes on Graphein protein
+graphs at either residue or atom granularity.
 
 ## Status
 
-Pre-release (v0). Residue-level graph happy path with explicit
-`(chain_id, residue_number, insertion_code)` key matching against
-proteon's residue list. Smoke-tested against a Graphein-built graph
-from `1crn.pdb`. No PyPI release yet.
+Pre-release (v0.1). Residue and atom-level graphs supported with
+`(chain_id, residue_number, insertion_code[, atom_name])` key matching
+against proteon's residue/atom list. Granularity is auto-detected from
+the graph. Parity-tested against Graphein-built graphs from `1crn.pdb`
+(residue + atom) and `1ake.pdb` (HETATM). No PyPI release yet.
 
 ## Install (development)
 
@@ -22,17 +25,32 @@ uv pip install -e .[graphein,dev]
 
 ## Usage
 
+Residue-level graph (Graphein default — CA atoms):
+
 ```python
 import graphein.protein as gp
 from proteon_graphein import add_proteon_features
 
-graph = gp.construct_graph(pdb_path="1crn.pdb")
-graph = add_proteon_features(graph, pdb_path="1crn.pdb")
+graph = gp.construct_graph(path="1crn.pdb")
+graph = add_proteon_features(graph, "1crn.pdb", hbond_count=True, dihedrals=True)
 
 for node, data in graph.nodes(data=True):
-    print(node, data["residue_sasa"], data["rsa"], data["dssp"])
+    print(node, data["residue_sasa"], data["dssp"], data.get("phi"))
 
 print(graph.graph["proteon_energy"]["total"], graph.graph["proteon_ff"])
+```
+
+Atom-level graph — granularity is auto-detected:
+
+```python
+from graphein.protein.config import ProteinGraphConfig
+
+graph = gp.construct_graph(config=ProteinGraphConfig(granularity="atom"), path="1crn.pdb")
+graph = add_proteon_features(graph, "1crn.pdb", hbond_count=True, dihedrals=True)
+
+sample = next(iter(graph.nodes(data=True)))[1]
+print(sample["atom_sasa"], sample["charge"], sample["is_backbone"])  # per-atom
+print(sample["residue_sasa"], sample["dssp"], sample["hbond_count"])  # broadcast
 ```
 
 If you only want the raw features without touching a graph:
@@ -40,9 +58,13 @@ If you only want the raw features without touching a graph:
 ```python
 from proteon_graphein import compute_proteon_features
 
-feats = compute_proteon_features("1crn.pdb")
+feats = compute_proteon_features(
+    "1crn.pdb", atom_sasa=True, hbond_count=True, dihedrals=True
+)
 print(feats["dssp"])             # 'CCCSSHHHHHHHHHHHCCC...'
 print(feats["residue_sasa"])     # numpy array, Å² per residue
+print(feats["atom_sasa"])        # numpy array, Å² per atom
+print(feats["phi"])              # degrees, NaN at chain termini
 print(feats["energy"]["total"])  # CHARMM19+EEF1 total in kJ/mol
 ```
 
@@ -57,14 +79,19 @@ user opt into proteon features in one call.
 
 ## Roadmap
 
-- v0.0.1 (current): residue-level graph, SASA + RSA + DSSP + total energy,
-  explicit `(chain_id, residue_number, insertion_code)` key matching, real
-  Graphein integration test against `1crn.pdb`.
-- v0.1.x: per-residue energy decomposition as node attributes; atom-level
-  graph support.
+- v0.0.1: residue-level graph, SASA + RSA + DSSP + total energy, explicit
+  `(chain_id, residue_number, insertion_code)` key matching, real Graphein
+  integration test against `1crn.pdb`.
+- v0.1.0 (current): atom-level graph support with auto-detected granularity,
+  per-atom SASA + charge + is_backbone + hetero, residue features broadcast
+  to atoms, plus new residue-level features (hbond_count, phi/psi/omega).
+  Atom-level parity claim added to the EVIDENT manifest.
 - v0.2.x: optional batch helper for many graphs in one proteon call.
 - v0.3.x: PyTorch Geometric `transform` adapter so the same features land
   inside a PyG `InMemoryDataset` pipeline without going through Graphein.
+- Deferred: per-residue / per-atom energy decomposition. Blocked on a
+  proteon API for residue-resolved energy components — `compute_energy`
+  currently returns whole-structure totals only.
 
 ## Trust
 

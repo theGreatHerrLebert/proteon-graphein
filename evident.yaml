@@ -16,17 +16,25 @@ claims:
       - validation
     claim: >
       For every Graphein node matched by add_proteon_features, the attached
-      values (residue_sasa, rsa, dssp) and the graph-level proteon_energy dict
-      are exactly equal to what proteon would return when called directly on
-      the same PDB. The adapter must not lose, reorder, round, or rebadge
-      values during residue-key matching.
+      values are exactly equal to what proteon would return when called
+      directly on the same PDB. Coverage: (a) residue-level graphs --
+      residue_sasa, rsa, dssp, hbond_count, phi/psi/omega; (b) atom-level
+      graphs -- per-atom atom_sasa + charge + is_backbone + hetero, and the
+      same residue-level features broadcast to every atom of the residue;
+      (c) the graph-level proteon_energy dict. The adapter must not lose,
+      reorder, round, or rebadge values during residue-key or atom-key
+      matching. NaN values in proteon outputs (RSA on non-standard residues,
+      phi/psi/omega at chain termini) are tolerated by being absent on the
+      graph rather than attached as float('nan').
     evidence:
       oracle:
         - proteon (direct compute_proteon_features call, same process)
       tolerance: >
-        Exact equality for floats; string equality for DSSP codes; NaN-aware
-        for RSA. Same backend, same process, no recomputation -- any drift
-        means the adapter mutated a value in transport.
+        Exact equality for floats (SASA, RSA, atom_sasa, charge, dihedrals);
+        string equality for DSSP codes; integer equality for hbond_count;
+        bool equality for is_backbone / hetero. Same backend, same process,
+        no recomputation -- any drift means the adapter mutated a value in
+        transport. NaN positions must be absent rather than attached.
       command: >
         /scratch/TMAlign/proteon/.venv/bin/python -m pytest
         tests/test_parity.py -v
@@ -37,18 +45,28 @@ claims:
       - Graphein's default residue-level node attributes expose chain_id and
         residue_number; insertion_code is normalized to the empty string when
         absent.
+      - Atom-level Graphein graphs expose atom_type alongside chain_id and
+        residue_number; alt-loc handling follows Graphein's defaults.
       - Test fixtures live at /scratch/TMAlign/proteon/test-pdbs/ and tests
         skip (not fail) when those files are missing.
     failure_modes:
       - Graphein silently changes its node-id schema, breaking the residue-key
         match while leaving the parity test trivially passing. Mitigation
         n_checked > 0 guard in test_parity_residue_features_match_direct_proteon_call.
+      - Graphein silently changes its atom-level node attribute names
+        (e.g. renames atom_type), breaking atom-key matching. Mitigation
+        n_atom_sasa > 0 guard in
+        test_parity_atom_level_features_match_direct_proteon_call.
       - proteon adds a new energy component that the integration test does not
         explicitly check. Mitigation set-equality of energy dict keys in
         test_parity_graph_energy_matches_direct_proteon_call.
       - HETATM residues acquire DSSP codes via a Graphein/proteon residue
         classification disagreement. Mitigation
         test_parity_hetatm_residues_dssp_only_for_aa on the 1ake fixture.
+      - proteon residue/atom iteration order diverges from the flat order
+        of atom_sasa or backbone_dihedrals arrays. Mitigation atom_sasa
+        oracle is built by walking residues -> residue.atoms with a single
+        flat counter, and the test re-derives it the same way.
 
 # Deferred claims are tracked separately so the validated manifest never
 # carries placeholder evidence (Validation Theater anti-pattern). Each entry

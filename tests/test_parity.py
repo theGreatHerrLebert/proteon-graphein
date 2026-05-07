@@ -23,19 +23,24 @@ from pathlib import Path
 import pytest
 
 from proteon_graphein import add_proteon_features, compute_proteon_features
-from proteon_graphein.features import _residue_key
+from proteon_graphein.features import _atom_key, _residue_key
 
 TEST_PDB = Path("/scratch/TMAlign/proteon/test-pdbs/1crn.pdb")
 TEST_PDB_HET = Path("/scratch/TMAlign/proteon/test-pdbs/1ake.pdb")
 
 
-def _build_graph(pdb_path: Path):
+def _build_graph(pdb_path: Path, granularity: str | None = None):
     pytest.importorskip("graphein")
     pytest.importorskip("networkx")
     import graphein.protein as gp
     from graphein.protein.config import ProteinGraphConfig
 
-    return gp.construct_graph(config=ProteinGraphConfig(), path=str(pdb_path))
+    config = (
+        ProteinGraphConfig(granularity=granularity)
+        if granularity is not None
+        else ProteinGraphConfig()
+    )
+    return gp.construct_graph(config=config, path=str(pdb_path))
 
 
 def _residue_index_lookups(structure):
@@ -79,14 +84,15 @@ def test_parity_residue_features_match_direct_proteon_call() -> None:
                 f"oracle={expected_sasa!r}"
             )
             expected_rsa = float(feats["rsa"][i])
-            graph_rsa = data["rsa"]
             if math.isnan(expected_rsa):
-                assert math.isnan(graph_rsa), (
-                    f"RSA NaN-parity broken at {node_id}: graph={graph_rsa!r}"
+                # NaN positions must be absent rather than attached as float('nan').
+                assert "rsa" not in data, (
+                    f"RSA NaN-parity broken at {node_id}: graph attached nan"
                 )
             else:
-                assert graph_rsa == expected_rsa, (
-                    f"RSA mismatch at {node_id}: graph={graph_rsa!r} oracle={expected_rsa!r}"
+                assert data["rsa"] == expected_rsa, (
+                    f"RSA mismatch at {node_id}: "
+                    f"graph={data.get('rsa')!r} oracle={expected_rsa!r}"
                 )
             n_checked_sasa += 1
 
@@ -121,6 +127,93 @@ def test_parity_graph_energy_matches_direct_proteon_call() -> None:
             f"energy[{key!r}] mismatch: graph={actual[key]!r} oracle={exp_val!r}"
         )
     assert graph.graph["proteon_ff"] == "charmm19_eef1"
+
+
+@pytest.mark.skipif(not TEST_PDB.exists(), reason="1crn.pdb fixture not available")
+def test_parity_atom_level_features_match_direct_proteon_call() -> None:
+    """Atom-level node values must equal direct-API atom_sasa, charge, and broadcast residue features."""
+    feats = compute_proteon_features(
+        TEST_PDB, atom_sasa=True, hbond_count=True, dihedrals=True
+    )
+    structure = feats["structure"]
+    res_idx, aa_idx = _residue_index_lookups(structure)
+
+    atom_sasa_oracle: dict[tuple, float] = {}
+    atom_meta_oracle: dict[tuple, dict] = {}
+    flat_idx = 0
+    for residue in structure.residues:
+        for atom in residue.atoms:
+            akey = _atom_key(
+                residue.chain_id,
+                residue.serial_number,
+                residue.insertion_code,
+                atom.name,
+            )
+            atom_sasa_oracle[akey] = float(feats["atom_sasa"][flat_idx])
+            atom_meta_oracle[akey] = {
+                "charge": float(atom.charge),
+                "is_backbone": bool(atom.is_backbone),
+                "hetero": bool(atom.hetero),
+            }
+            flat_idx += 1
+
+    graph = _build_graph(TEST_PDB, granularity="atom")
+    graph = add_proteon_features(
+        graph, TEST_PDB, hbond_count=True, dihedrals=True, energy=False
+    )
+
+    n_atom_sasa = 0
+    n_broadcast_sasa = 0
+    n_broadcast_dssp = 0
+    n_broadcast_hbond = 0
+    n_dihedral = 0
+    for node_id, data in graph.nodes(data=True):
+        rkey = _residue_key(
+            data.get("chain_id"),
+            data.get("residue_number"),
+            data.get("insertion_code") or data.get("insertion"),
+        )
+        akey = _atom_key(
+            data.get("chain_id"),
+            data.get("residue_number"),
+            data.get("insertion_code") or data.get("insertion"),
+            data.get("atom_type") or data.get("atom_name"),
+        )
+
+        if "atom_sasa" in data:
+            assert akey in atom_sasa_oracle, f"atom {node_id} not in oracle"
+            assert data["atom_sasa"] == atom_sasa_oracle[akey], (
+                f"atom_sasa mismatch at {node_id}: "
+                f"graph={data['atom_sasa']!r} oracle={atom_sasa_oracle[akey]!r}"
+            )
+            for k, expected in atom_meta_oracle[akey].items():
+                assert data[k] == expected, (
+                    f"{k} mismatch at {node_id}: graph={data[k]!r} oracle={expected!r}"
+                )
+            n_atom_sasa += 1
+
+        if "residue_sasa" in data:
+            i = res_idx[rkey]
+            assert data["residue_sasa"] == float(feats["residue_sasa"][i])
+            n_broadcast_sasa += 1
+        if "dssp" in data:
+            j = aa_idx[rkey]
+            assert data["dssp"] == feats["dssp"][j]
+            n_broadcast_dssp += 1
+        if "hbond_count" in data:
+            j = aa_idx[rkey]
+            assert data["hbond_count"] == int(feats["hbond_count"][j])
+            n_broadcast_hbond += 1
+        if "phi" in data:
+            j = aa_idx[rkey]
+            assert data["phi"] == float(feats["phi"][j])
+            n_dihedral += 1
+
+    assert n_atom_sasa > 0, "no atoms received per-atom SASA — adapter or fixture broken"
+    assert n_broadcast_sasa > 0, "no atoms received broadcast residue_sasa"
+    assert n_broadcast_dssp > 0, "no atoms received broadcast DSSP"
+    assert n_broadcast_hbond > 0, "no atoms received broadcast hbond_count"
+    assert n_dihedral > 0, "no atoms received broadcast phi"
 
 
 @pytest.mark.skipif(not TEST_PDB_HET.exists(), reason="1ake.pdb fixture not available")

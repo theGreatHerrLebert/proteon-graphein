@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import proteon
 
@@ -12,6 +13,8 @@ if TYPE_CHECKING:
 
 
 ResidueKey = tuple[str, int, str]
+AtomKey = tuple[str, int, str, str]
+Granularity = Literal["auto", "residue", "atom"]
 
 
 def compute_proteon_features(
@@ -20,6 +23,9 @@ def compute_proteon_features(
     sasa: bool = True,
     dssp: bool = True,
     energy: bool = True,
+    atom_sasa: bool = False,
+    hbond_count: bool = False,
+    dihedrals: bool = False,
     ff: str = "charmm19_eef1",
     sasa_radii: str = "bondi",
 ) -> dict[str, Any]:
@@ -32,6 +38,11 @@ def compute_proteon_features(
         dssp         : str, one 8-state DSSP code per **amino-acid** residue.
                        Length equals ``sum(r.is_amino_acid for r in structure.residues)``.
         energy       : dict from proteon.compute_energy (total + components).
+        atom_sasa    : np.ndarray of per-atom SASA in Å² (length n_atoms,
+                       flat order matching ``structure.atoms``).
+        hbond_count  : np.ndarray of per-AA-residue backbone H-bond counts.
+        phi, psi, omega : np.ndarray of per-AA-residue backbone dihedrals
+                       in degrees, NaN at chain termini.
         structure    : the loaded proteon.Structure (always populated).
     """
     structure = proteon.load(str(pdb_path))
@@ -46,6 +57,18 @@ def compute_proteon_features(
 
     if energy:
         out["energy"] = proteon.compute_energy(structure, ff=ff)
+
+    if atom_sasa:
+        out["atom_sasa"] = proteon.atom_sasa(structure, radii=sasa_radii)
+
+    if hbond_count:
+        out["hbond_count"] = proteon.hbond_count(structure)
+
+    if dihedrals:
+        phi, psi, omega = proteon.backbone_dihedrals(structure)
+        out["phi"] = phi
+        out["psi"] = psi
+        out["omega"] = omega
 
     return out
 
@@ -63,6 +86,31 @@ def _residue_key(
     return (str(chain_id or ""), int(residue_number or 0), icode)
 
 
+def _atom_key(
+    chain_id: str | None,
+    residue_number: int | str | None,
+    insertion_code: str | None,
+    atom_name: str | None,
+) -> AtomKey:
+    """Stable atom identity for cross-matching proteon ↔ Graphein atom-level graphs."""
+    chain, resnum, icode = _residue_key(chain_id, residue_number, insertion_code)
+    return (chain, resnum, icode, str(atom_name or "").strip())
+
+
+def _detect_granularity(graph: nx.Graph) -> Literal["residue", "atom"]:
+    """Sniff Graphein granularity by looking for ``atom_type`` on any node."""
+    for _, data in graph.nodes(data=True):
+        if "atom_type" in data:
+            return "atom"
+    return "residue"
+
+
+def _safe_float(value: Any) -> float | None:
+    """Return float(value), or None if value is NaN. Skips NaN attrs on nodes."""
+    f = float(value)
+    return None if math.isnan(f) else f
+
+
 def add_proteon_features(
     graph: nx.Graph,
     pdb_path: str | Path,
@@ -70,44 +118,67 @@ def add_proteon_features(
     sasa: bool = True,
     dssp: bool = True,
     energy: bool = True,
+    hbond_count: bool = False,
+    dihedrals: bool = False,
+    atom_features: bool = True,
+    granularity: Granularity = "auto",
     ff: str = "charmm19_eef1",
 ) -> nx.Graph:
-    """Attach proteon features to a Graphein residue-level protein graph.
+    """Attach proteon features to a Graphein protein graph.
+
+    Granularity is auto-detected from the graph (residue vs atom). Pass
+    ``granularity="residue"`` or ``"atom"`` to override.
 
     Per-node attributes added when enabled:
-        residue_sasa : float (Å²) — every node whose residue key is found.
-        rsa          : float (relative SASA; may exceed 1.0 at termini, NaN for
-                       non-standard residues).
-        dssp         : single-character 8-state DSSP code — only attached to
-                       amino-acid residues. Non-AA nodes are left unchanged.
+        residue_sasa : float (Å²) per residue. On atom-level graphs, broadcast
+                       to every atom of the residue.
+        rsa          : relative SASA (may exceed 1.0 at termini). NaN values
+                       are skipped (attribute simply absent).
+        dssp         : 8-state DSSP code, AA residues only. Broadcast to atoms
+                       on atom-level graphs.
+        hbond_count  : backbone H-bond count per AA residue (uint). Broadcast
+                       to atoms on atom-level graphs.
+        phi, psi, omega : backbone dihedrals in degrees, AA residues only.
+                       NaN at chain termini are skipped.
+        atom_sasa    : per-atom SASA in Å² (atom-level graphs only).
+        charge       : partial charge from proteon.Atom (atom-level only).
+        is_backbone  : bool, atom-level only.
+        hetero       : bool (HETATM flag), atom-level only.
 
     Graph-level attributes added when ``energy=True``:
         proteon_energy : dict from proteon.compute_energy
         proteon_ff     : the force-field name used
 
-    Matching is by (chain_id, residue_number, insertion_code). Graphein's
-    default residue-level node attrs do not include insertion_code, so it is
-    treated as ``""``; structures relying on insertion codes need a Graphein
-    config that surfaces them.
+    Args:
+        atom_features: when False on an atom-level graph, skips per-atom
+            attributes (atom_sasa/charge/is_backbone/hetero) but still
+            broadcasts residue features.
+
+    Matching is by (chain_id, residue_number, insertion_code), and additionally
+    by atom_name for atom-level graphs. Insertion_code is normalized to ``""``
+    when missing.
 
     Raises:
-        ValueError: when no graph node could be matched to any proteon residue
-            (almost always means the graph was built from a different PDB).
+        ValueError: when no graph node could be matched (almost always means
+            the graph was built from a different PDB).
     """
+    if granularity == "auto":
+        granularity = _detect_granularity(graph)
+
     feats = compute_proteon_features(
         pdb_path,
         sasa=sasa,
         dssp=dssp,
         energy=energy,
+        atom_sasa=(granularity == "atom" and atom_features),
+        hbond_count=hbond_count,
+        dihedrals=dihedrals,
         ff=ff,
     )
 
     if energy:
         graph.graph["proteon_energy"] = feats["energy"]
         graph.graph["proteon_ff"] = ff
-
-    if not (sasa or dssp):
-        return graph
 
     structure = feats["structure"]
     residues = structure.residues
@@ -133,21 +204,98 @@ def add_proteon_features(
             key = _residue_key(residue.chain_id, residue.serial_number, residue.insertion_code)
             dssp_lookup[key] = code
 
+    hbond_lookup: dict[ResidueKey, int] = {}
+    phi_lookup: dict[ResidueKey, float] = {}
+    psi_lookup: dict[ResidueKey, float] = {}
+    omega_lookup: dict[ResidueKey, float] = {}
+    if hbond_count or dihedrals:
+        aa_residues = [r for r in residues if r.is_amino_acid]
+        if hbond_count and len(feats["hbond_count"]) != len(aa_residues):
+            raise RuntimeError(
+                f"proteon hbond_count returned {len(feats['hbond_count'])} entries "
+                f"for {len(aa_residues)} amino-acid residues — internal mismatch."
+            )
+        if dihedrals and len(feats["phi"]) != len(aa_residues):
+            raise RuntimeError(
+                f"proteon backbone_dihedrals returned {len(feats['phi'])} entries "
+                f"for {len(aa_residues)} amino-acid residues — internal mismatch."
+            )
+        for j, residue in enumerate(aa_residues):
+            key = _residue_key(residue.chain_id, residue.serial_number, residue.insertion_code)
+            if hbond_count:
+                hbond_lookup[key] = int(feats["hbond_count"][j])
+            if dihedrals:
+                phi_lookup[key] = float(feats["phi"][j])
+                psi_lookup[key] = float(feats["psi"][j])
+                omega_lookup[key] = float(feats["omega"][j])
+
+    atom_sasa_lookup: dict[AtomKey, float] = {}
+    atom_meta_lookup: dict[AtomKey, dict[str, Any]] = {}
+    if granularity == "atom":
+        per_atom = feats.get("atom_sasa") if atom_features else None
+        idx = 0
+        for residue in residues:
+            for atom in residue.atoms:
+                key = _atom_key(
+                    residue.chain_id,
+                    residue.serial_number,
+                    residue.insertion_code,
+                    atom.name,
+                )
+                if per_atom is not None:
+                    atom_sasa_lookup[key] = float(per_atom[idx])
+                if atom_features:
+                    atom_meta_lookup[key] = {
+                        "charge": float(atom.charge),
+                        "is_backbone": bool(atom.is_backbone),
+                        "hetero": bool(atom.hetero),
+                    }
+                idx += 1
+
     n_attached = 0
     for node_id, data in graph.nodes(data=True):
-        key = _residue_key(
+        rkey = _residue_key(
             data.get("chain_id"),
             data.get("residue_number"),
             data.get("insertion_code") or data.get("insertion"),
         )
+        node_attrs = graph.nodes[node_id]
         attached_any = False
-        if sasa and key in sasa_lookup:
-            graph.nodes[node_id]["residue_sasa"] = sasa_lookup[key]
-            graph.nodes[node_id]["rsa"] = rsa_lookup[key]
+
+        if sasa and rkey in sasa_lookup:
+            node_attrs["residue_sasa"] = sasa_lookup[rkey]
+            rsa_val = _safe_float(rsa_lookup[rkey])
+            if rsa_val is not None:
+                node_attrs["rsa"] = rsa_val
             attached_any = True
-        if dssp and key in dssp_lookup:
-            graph.nodes[node_id]["dssp"] = dssp_lookup[key]
+        if dssp and rkey in dssp_lookup:
+            node_attrs["dssp"] = dssp_lookup[rkey]
             attached_any = True
+        if hbond_count and rkey in hbond_lookup:
+            node_attrs["hbond_count"] = hbond_lookup[rkey]
+            attached_any = True
+        if dihedrals and rkey in phi_lookup:
+            for name, lookup in (("phi", phi_lookup), ("psi", psi_lookup), ("omega", omega_lookup)):
+                val = _safe_float(lookup[rkey])
+                if val is not None:
+                    node_attrs[name] = val
+            attached_any = True
+
+        if granularity == "atom":
+            akey = _atom_key(
+                data.get("chain_id"),
+                data.get("residue_number"),
+                data.get("insertion_code") or data.get("insertion"),
+                data.get("atom_type") or data.get("atom_name"),
+            )
+            if akey in atom_sasa_lookup:
+                node_attrs["atom_sasa"] = atom_sasa_lookup[akey]
+                attached_any = True
+            if akey in atom_meta_lookup:
+                for k, v in atom_meta_lookup[akey].items():
+                    node_attrs[k] = v
+                attached_any = True
+
         if attached_any:
             n_attached += 1
 

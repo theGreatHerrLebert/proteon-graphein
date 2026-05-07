@@ -5,9 +5,11 @@ Source repo: `.` (this directory)
 ## Problem
 
 `proteon-graphein` is a thin adapter that attaches `proteon`-computed
-structural features (per-residue SASA, relative SASA, 8-state DSSP, and
-CHARMM19+EEF1 / AMBER96 total energy) as node and graph attributes on a
-[Graphein](https://github.com/a-r-j/graphein) protein graph.
+structural features (per-residue SASA, relative SASA, 8-state DSSP,
+backbone H-bond counts, phi/psi/omega dihedrals, per-atom SASA + atom
+metadata, and CHARMM19+EEF1 / AMBER96 total energy) as node and graph
+attributes on a [Graphein](https://github.com/a-r-j/graphein) protein
+graph at either residue or atom granularity.
 
 Adapters are a quiet failure surface in geometric-DL pipelines: numbers go in,
 named features come out, and downstream models have no way to tell whether
@@ -22,8 +24,9 @@ Validation, with `proteon` itself as the oracle.
 
 The adapter does not *compute* features. It calls `proteon` and then routes
 those values to Graphein nodes by `(chain_id, residue_number, insertion_code)`
-keys. The trust question is therefore narrow: **do the values that land on the
-graph equal the values `proteon` returned for the same residue?**
+keys at residue level — and additionally by `atom_name` for atom-level
+graphs. The trust question is therefore narrow: **do the values that land on
+the graph equal the values `proteon` returned for the same residue or atom?**
 
 Because the oracle and the implementation share a process and a `proteon`
 version, the tolerance is exact equality. Any drift means the adapter mutated
@@ -31,14 +34,19 @@ a value during transport, not that `proteon` is non-deterministic.
 
 ## Evidence
 
-- `tests/test_parity.py` — three parity tests covering:
-  - per-node SASA / RSA / DSSP equality (NaN-aware)
+- `tests/test_parity.py` — four parity tests covering:
+  - residue-level per-node SASA / RSA / DSSP equality (NaN-aware: NaN
+    positions must be absent on the graph, not attached as `float('nan')`)
+  - atom-level per-atom SASA / charge / is_backbone / hetero equality, and
+    broadcast residue features (residue_sasa, dssp, hbond_count, phi) at
+    atom granularity
   - graph-level energy dict equality (key set + per-key value equality)
   - HETATM residues never carry DSSP codes
 - Fixtures: `1crn.pdb` (pure protein) and `1ake.pdb` (protein + waters/ligand),
-  exercised through `Graphein` rather than mocked.
-- A guard rail (`n_checked > 0`) ensures that a future Graphein node-id
-  schema change cannot make the parity test trivially pass.
+  exercised through `Graphein` rather than mocked, at both residue and atom
+  granularity.
+- Guard rails: `n_checked > 0` and `n_atom_sasa > 0` ensure that a future
+  Graphein node-id schema change cannot make the parity tests trivially pass.
 
 ## Assumptions
 
@@ -51,13 +59,17 @@ a value during transport, not that `proteon` is non-deterministic.
 
 ## Failure Modes
 
-- Graphein silently changes its node-id schema, breaking the residue-key
-  match while leaving the parity test trivially passing — caught by the
-  `n_checked > 0` guard.
+- Graphein silently changes its node-id schema (residue or atom level),
+  breaking the key match while leaving the parity test trivially passing —
+  caught by the `n_checked > 0` and `n_atom_sasa > 0` guards.
 - `proteon` adds a new energy component that the integration test does not
   check explicitly — caught by set-equality of energy dict keys.
 - HETATM residues acquire DSSP codes due to a Graphein/`proteon` residue
   classification disagreement — caught on the `1ake` fixture.
+- proteon residue/atom iteration order diverges from the flat order of
+  `atom_sasa` or `backbone_dihedrals` arrays — caught because the atom-level
+  parity oracle is built by walking residues → `residue.atoms` with the
+  same flat counter the adapter uses.
 
 ## What Is Still Lacking (Deferred Claims)
 
