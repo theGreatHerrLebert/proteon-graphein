@@ -34,14 +34,18 @@ a value during transport, not that `proteon` is non-deterministic.
 
 ## Evidence
 
-- `tests/test_parity.py` — four parity tests covering:
-  - residue-level per-node SASA / RSA / DSSP equality (NaN-aware: NaN
-    positions must be absent on the graph, not attached as `float('nan')`)
+- `tests/test_parity.py` — five parity tests covering:
+  - residue-level per-node SASA / RSA / DSSP / hbond_count / phi/psi/omega
+    equality (NaN-aware: NaN positions must be absent on the graph, not
+    attached as `float('nan')`)
   - atom-level per-atom SASA / charge / is_backbone / hetero equality, and
-    broadcast residue features (residue_sasa, dssp, hbond_count, phi) at
-    atom granularity
+    broadcast residue features at atom granularity (all three dihedrals)
   - graph-level energy dict equality (key set + per-key value equality)
   - HETATM residues never carry DSSP codes
+  - `add_proteon_features_batch(graphs, paths)` produces graphs with
+    exactly the same node and graph attributes as a Python loop calling
+    `add_proteon_features(graphs[i], paths[i])` one at a time, on a
+    heterogeneous batch (residue + atom + residue, mixed PDBs)
 - Fixtures: `1crn.pdb` (pure protein) and `1ake.pdb` (protein + waters/ligand),
   exercised through `Graphein` rather than mocked, at both residue and atom
   granularity.
@@ -70,6 +74,10 @@ a value during transport, not that `proteon` is non-deterministic.
   `atom_sasa` or `backbone_dihedrals` arrays — caught because the atom-level
   parity oracle is built by walking residues → `residue.atoms` with the
   same flat counter the adapter uses.
+- A future proteon batch primitive drifts from its single-call sibling in
+  iteration order or rounding — caught by the batch-vs-loop full-attribute
+  equality test, which compares every node and graph attribute on a
+  heterogeneous batch.
 
 ## What Is Still Lacking (Deferred Claims)
 

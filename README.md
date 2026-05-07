@@ -9,11 +9,15 @@ graphs at either residue or atom granularity.
 
 ## Status
 
-Pre-release (v0.1). Residue and atom-level graphs supported with
+Pre-release (v0.2). Residue and atom-level graphs supported with
 `(chain_id, residue_number, insertion_code[, atom_name])` key matching
 against proteon's residue/atom list. Granularity is auto-detected from
-the graph. Parity-tested against Graphein-built graphs from `1crn.pdb`
-(residue + atom) and `1ake.pdb` (HETATM). No PyPI release yet.
+the graph. v0.2 adds a batch entry point that goes through proteon's
+rayon-parallel primitives (`batch_residue_sasa`, `batch_relative_sasa`,
+`batch_atom_sasa`, `batch_dssp`, `batch_dihedrals`, `batch_hbond_count`,
+`batch_compute_energy`). Parity-tested against Graphein-built graphs from
+`1crn.pdb` and `1ake.pdb`, both residue and atom granularity, including
+batch-vs-loop equality. No PyPI release yet.
 
 ## Install (development)
 
@@ -68,6 +72,24 @@ print(feats["phi"])              # degrees, NaN at chain termini
 print(feats["energy"]["total"])  # CHARMM19+EEF1 total in kJ/mol
 ```
 
+Batched over many PDBs in one parallel proteon call:
+
+```python
+from proteon_graphein import add_proteon_features_batch
+
+graphs = [gp.construct_graph(path=p) for p in pdb_paths]
+add_proteon_features_batch(
+    graphs, pdb_paths,
+    hbond_count=True, dihedrals=True,
+    n_threads=-1,  # all cores
+)
+```
+
+Each graph in `graphs` ends up with the same attributes as a single-call
+`add_proteon_features` but loading and feature compute happen in parallel
+in Rust. Graphs with different granularity can be mixed in one batch.
+Strict mode only — one bad PDB raises.
+
 ## Why
 
 Graphein is the de facto featurization layer for protein graphs in PyTorch
@@ -82,13 +104,19 @@ user opt into proteon features in one call.
 - v0.0.1: residue-level graph, SASA + RSA + DSSP + total energy, explicit
   `(chain_id, residue_number, insertion_code)` key matching, real Graphein
   integration test against `1crn.pdb`.
-- v0.1.0 (current): atom-level graph support with auto-detected granularity,
+- v0.1.0: atom-level graph support with auto-detected granularity,
   per-atom SASA + charge + is_backbone + hetero, residue features broadcast
   to atoms, plus new residue-level features (hbond_count, phi/psi/omega).
   Atom-level parity claim added to the EVIDENT manifest.
-- v0.2.x: optional batch helper for many graphs in one proteon call.
+- v0.2.0 (current): `add_proteon_features_batch` and
+  `compute_proteon_features_batch` — load + compute features for many PDBs
+  in one parallel proteon call via batch primitives (added upstream in
+  proteon for this release). Strict mode only. Mixed-granularity batches
+  supported. Batch-equals-loop parity claim added to the EVIDENT manifest.
 - v0.3.x: PyTorch Geometric `transform` adapter so the same features land
   inside a PyG `InMemoryDataset` pipeline without going through Graphein.
+- v0.2.x follow-ups: tolerant batch loading (skip + return success
+  indices); accepting pre-loaded `proteon.Structure` objects directly.
 - Deferred: per-residue / per-atom energy decomposition. Blocked on a
   proteon API for residue-resolved energy components — `compute_energy`
   currently returns whole-structure totals only.

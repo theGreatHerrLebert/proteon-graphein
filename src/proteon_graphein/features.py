@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, Sequence
 
 import proteon
 
@@ -15,6 +15,11 @@ if TYPE_CHECKING:
 ResidueKey = tuple[str, int, str]
 AtomKey = tuple[str, int, str, str]
 Granularity = Literal["auto", "residue", "atom"]
+
+
+# ---------------------------------------------------------------------------
+# Single-structure feature computation
+# ---------------------------------------------------------------------------
 
 
 def compute_proteon_features(
@@ -71,6 +76,99 @@ def compute_proteon_features(
         out["omega"] = omega
 
     return out
+
+
+# ---------------------------------------------------------------------------
+# Batch feature computation (uses proteon's parallel primitives where they
+# exist; pure Python loop otherwise)
+# ---------------------------------------------------------------------------
+
+
+def compute_proteon_features_batch(
+    pdb_paths: Sequence[str | Path],
+    *,
+    sasa: bool = True,
+    dssp: bool = True,
+    energy: bool = True,
+    atom_sasa: bool = False,
+    hbond_count: bool = False,
+    dihedrals: bool = False,
+    ff: str = "charmm19_eef1",
+    sasa_radii: str = "bondi",
+    n_threads: int | None = None,
+) -> list[dict[str, Any]]:
+    """Compute proteon features for many PDBs using rayon-parallel primitives.
+
+    Same per-structure result shape as :func:`compute_proteon_features`. Loads
+    structures via ``proteon.batch_load`` and dispatches each enabled feature
+    through its corresponding ``batch_*`` primitive (added in proteon's
+    batch-primitives PR). Strict mode only — one bad PDB raises.
+
+    Args:
+        pdb_paths: Sequence of paths to PDB files.
+        n_threads: Thread count for the proteon batch calls.
+            ``None`` / ``-1`` / ``0`` = all cores.
+
+    Returns:
+        List of feature dicts in input order.
+    """
+    paths = [str(p) for p in pdb_paths]
+    structures = proteon.batch_load(paths, n_threads=n_threads)
+
+    n = len(structures)
+    out: list[dict[str, Any]] = [{"structure": s} for s in structures]
+
+    if not n:
+        return out
+
+    if sasa:
+        residue_sasas = proteon.batch_residue_sasa(
+            structures, radii=sasa_radii, n_threads=n_threads
+        )
+        rsas = proteon.batch_relative_sasa(
+            structures, radii=sasa_radii, n_threads=n_threads
+        )
+        for i, (rs, rsa) in enumerate(zip(residue_sasas, rsas)):
+            out[i]["residue_sasa"] = rs
+            out[i]["rsa"] = rsa
+
+    if dssp:
+        codes = proteon.batch_dssp(structures, n_threads=n_threads)
+        for i, code in enumerate(codes):
+            out[i]["dssp"] = code
+
+    if energy:
+        energies = proteon.batch_compute_energy(
+            structures, ff=ff, n_threads=n_threads
+        )
+        for i, e in enumerate(energies):
+            out[i]["energy"] = e
+
+    if atom_sasa:
+        per_atom = proteon.batch_atom_sasa(
+            structures, radii=sasa_radii, n_threads=n_threads
+        )
+        for i, a in enumerate(per_atom):
+            out[i]["atom_sasa"] = a
+
+    if hbond_count:
+        counts = proteon.batch_hbond_count(structures, n_threads=n_threads)
+        for i, c in enumerate(counts):
+            out[i]["hbond_count"] = c
+
+    if dihedrals:
+        triples = proteon.batch_dihedrals(structures, n_threads=n_threads)
+        for i, (phi, psi, omega) in enumerate(triples):
+            out[i]["phi"] = phi
+            out[i]["psi"] = psi
+            out[i]["omega"] = omega
+
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Key normalization
+# ---------------------------------------------------------------------------
 
 
 def _residue_key(
@@ -131,71 +229,34 @@ def _safe_float(value: Any) -> float | None:
     return None if math.isnan(f) else f
 
 
-def add_proteon_features(
+# ---------------------------------------------------------------------------
+# Attach: write features into a graph (shared by single-call and batch paths)
+# ---------------------------------------------------------------------------
+
+
+def _attach_features(
     graph: nx.Graph,
-    pdb_path: str | Path,
+    feats: dict[str, Any],
     *,
-    sasa: bool = True,
-    dssp: bool = True,
-    energy: bool = True,
-    hbond_count: bool = False,
-    dihedrals: bool = False,
-    atom_features: bool = True,
-    granularity: Granularity = "auto",
-    ff: str = "charmm19_eef1",
+    sasa: bool,
+    dssp: bool,
+    energy: bool,
+    hbond_count: bool,
+    dihedrals: bool,
+    atom_features: bool,
+    granularity: Literal["residue", "atom"],
+    ff: str,
 ) -> nx.Graph:
-    """Attach proteon features to a Graphein protein graph.
+    """Write proteon features from a precomputed feats dict into a graph.
 
-    Granularity is auto-detected from the graph (residue vs atom). Pass
-    ``granularity="residue"`` or ``"atom"`` to override.
-
-    Per-node attributes added when enabled:
-        residue_sasa : float (Å²) per residue. On atom-level graphs, broadcast
-                       to every atom of the residue.
-        rsa          : relative SASA (may exceed 1.0 at termini). NaN values
-                       are skipped (attribute simply absent).
-        dssp         : 8-state DSSP code, AA residues only. Broadcast to atoms
-                       on atom-level graphs.
-        hbond_count  : backbone H-bond count per AA residue (uint). Broadcast
-                       to atoms on atom-level graphs.
-        phi, psi, omega : backbone dihedrals in degrees, AA residues only.
-                       NaN at chain termini are skipped.
-        atom_sasa    : per-atom SASA in Å² (atom-level graphs only).
-        charge       : partial charge from proteon.Atom (atom-level only).
-        is_backbone  : bool, atom-level only.
-        hetero       : bool (HETATM flag), atom-level only.
-
-    Graph-level attributes added when ``energy=True``:
-        proteon_energy : dict from proteon.compute_energy
-        proteon_ff     : the force-field name used
-
-    Args:
-        atom_features: when False on an atom-level graph, skips per-atom
-            attributes (atom_sasa/charge/is_backbone/hetero) but still
-            broadcasts residue features.
-
-    Matching is by (chain_id, residue_number, insertion_code), and additionally
-    by atom_name for atom-level graphs. Insertion_code is normalized to ``""``
-    when missing.
+    Pure attach step — does not call proteon. Used by both
+    :func:`add_proteon_features` (single graph) and
+    :func:`add_proteon_features_batch` (many graphs in one call).
 
     Raises:
-        ValueError: when no graph node could be matched (almost always means
-            the graph was built from a different PDB).
+        ValueError: when node-level features were requested but no node
+            matched (almost always a wrong-PDB pairing).
     """
-    if granularity == "auto":
-        granularity = _detect_granularity(graph)
-
-    feats = compute_proteon_features(
-        pdb_path,
-        sasa=sasa,
-        dssp=dssp,
-        energy=energy,
-        atom_sasa=(granularity == "atom" and atom_features),
-        hbond_count=hbond_count,
-        dihedrals=dihedrals,
-        ff=ff,
-    )
-
     if energy:
         graph.graph["proteon_energy"] = feats["energy"]
         graph.graph["proteon_ff"] = ff
@@ -334,3 +395,169 @@ def add_proteon_features(
         )
 
     return graph
+
+
+# ---------------------------------------------------------------------------
+# Public attach entry points
+# ---------------------------------------------------------------------------
+
+
+def add_proteon_features(
+    graph: nx.Graph,
+    pdb_path: str | Path,
+    *,
+    sasa: bool = True,
+    dssp: bool = True,
+    energy: bool = True,
+    hbond_count: bool = False,
+    dihedrals: bool = False,
+    atom_features: bool = True,
+    granularity: Granularity = "auto",
+    ff: str = "charmm19_eef1",
+) -> nx.Graph:
+    """Attach proteon features to a Graphein protein graph.
+
+    Granularity is auto-detected from the graph (residue vs atom). Pass
+    ``granularity="residue"`` or ``"atom"`` to override.
+
+    Per-node attributes added when enabled:
+        residue_sasa : float (Å²) per residue. On atom-level graphs, broadcast
+                       to every atom of the residue.
+        rsa          : relative SASA (may exceed 1.0 at termini). NaN values
+                       are skipped (attribute simply absent).
+        dssp         : 8-state DSSP code, AA residues only. Broadcast to atoms
+                       on atom-level graphs.
+        hbond_count  : backbone H-bond count per AA residue (uint). Broadcast
+                       to atoms on atom-level graphs.
+        phi, psi, omega : backbone dihedrals in degrees, AA residues only.
+                       NaN at chain termini are skipped.
+        atom_sasa    : per-atom SASA in Å² (atom-level graphs only).
+        charge       : partial charge from proteon.Atom (atom-level only).
+        is_backbone  : bool, atom-level only.
+        hetero       : bool (HETATM flag), atom-level only.
+
+    Graph-level attributes added when ``energy=True``:
+        proteon_energy : dict from proteon.compute_energy
+        proteon_ff     : the force-field name used
+
+    Args:
+        atom_features: when False on an atom-level graph, skips per-atom
+            attributes (atom_sasa/charge/is_backbone/hetero) but still
+            broadcasts residue features.
+
+    Matching is by (chain_id, residue_number, insertion_code), and additionally
+    by atom_name for atom-level graphs. Insertion_code is normalized to ``""``
+    when missing.
+
+    Raises:
+        ValueError: when no graph node could be matched (almost always means
+            the graph was built from a different PDB).
+    """
+    if granularity == "auto":
+        granularity = _detect_granularity(graph)
+
+    feats = compute_proteon_features(
+        pdb_path,
+        sasa=sasa,
+        dssp=dssp,
+        energy=energy,
+        atom_sasa=(granularity == "atom" and atom_features),
+        hbond_count=hbond_count,
+        dihedrals=dihedrals,
+        ff=ff,
+    )
+
+    return _attach_features(
+        graph,
+        feats,
+        sasa=sasa,
+        dssp=dssp,
+        energy=energy,
+        hbond_count=hbond_count,
+        dihedrals=dihedrals,
+        atom_features=atom_features,
+        granularity=granularity,
+        ff=ff,
+    )
+
+
+def add_proteon_features_batch(
+    graphs: Sequence[nx.Graph],
+    pdb_paths: Sequence[str | Path],
+    *,
+    sasa: bool = True,
+    dssp: bool = True,
+    energy: bool = True,
+    hbond_count: bool = False,
+    dihedrals: bool = False,
+    atom_features: bool = True,
+    granularity: Granularity = "auto",
+    ff: str = "charmm19_eef1",
+    n_threads: int | None = None,
+) -> list[nx.Graph]:
+    """Attach proteon features to many graphs in one batched proteon call.
+
+    Loads structures and computes features in parallel via proteon's batch
+    primitives, then applies the attach step to each (graph, feats) pair.
+    Strict mode only — one bad PDB raises.
+
+    Granularity is detected per graph (mixing residue and atom-level graphs
+    in one batch is supported); when any graph is atom-level, ``batch_atom_sasa``
+    runs for the whole batch, and per-atom features are written only into
+    atom-level graphs.
+
+    Args:
+        graphs: Sequence of Graphein graphs in the same order as ``pdb_paths``.
+        pdb_paths: Sequence of paths to the PDB files used to build ``graphs``.
+        n_threads: Thread count for proteon batch calls.
+
+    Returns:
+        The same ``graphs`` list, with features attached in place.
+
+    Raises:
+        ValueError: on length mismatch, or when a graph's nodes do not match
+            its paired PDB.
+    """
+    if len(graphs) != len(pdb_paths):
+        raise ValueError(
+            f"len(graphs)={len(graphs)} does not match len(pdb_paths)={len(pdb_paths)}"
+        )
+    if not graphs:
+        return list(graphs)
+
+    if granularity == "auto":
+        per_graph_granularity: list[Literal["residue", "atom"]] = [
+            _detect_granularity(g) for g in graphs
+        ]
+    else:
+        per_graph_granularity = [granularity] * len(graphs)
+
+    any_atom = any(g == "atom" for g in per_graph_granularity)
+
+    feats_list = compute_proteon_features_batch(
+        pdb_paths,
+        sasa=sasa,
+        dssp=dssp,
+        energy=energy,
+        atom_sasa=(any_atom and atom_features),
+        hbond_count=hbond_count,
+        dihedrals=dihedrals,
+        ff=ff,
+        n_threads=n_threads,
+    )
+
+    for graph, feats, gr in zip(graphs, feats_list, per_graph_granularity):
+        _attach_features(
+            graph,
+            feats,
+            sasa=sasa,
+            dssp=dssp,
+            energy=energy,
+            hbond_count=hbond_count,
+            dihedrals=dihedrals,
+            atom_features=atom_features,
+            granularity=gr,
+            ff=ff,
+        )
+
+    return list(graphs)

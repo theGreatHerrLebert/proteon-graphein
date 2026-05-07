@@ -68,6 +68,50 @@ claims:
         oracle is built by walking residues -> residue.atoms with a single
         flat counter, and the test re-derives it the same way.
 
+  - id: proteon-graphein-batch-parity
+    title: add_proteon_features_batch produces identical results to a loop
+    case: CASE.md
+    source: src
+    tier: ci
+    trust_strategy:
+      - validation
+    claim: >
+      For any sequence of (graph, pdb_path) pairs, the graphs returned by
+      add_proteon_features_batch(graphs, paths) carry exactly the same
+      node and graph attributes as graphs produced by a Python loop calling
+      add_proteon_features(graphs[i], paths[i]) one at a time. Tested with
+      a heterogeneous batch (residue-level 1crn, atom-level 1ake,
+      residue-level 1crn) covering single + atom granularities.
+    evidence:
+      oracle:
+        - add_proteon_features (single-call helper, same process)
+      tolerance: >
+        Exact equality for every node and graph attribute. The single-call
+        helper is itself parity-tested against direct proteon API calls
+        (claim proteon-graphein-residue-feature-parity), so this claim is
+        transitively a parity claim against proteon.
+      command: >
+        /scratch/TMAlign/proteon/.venv/bin/python -m pytest
+        tests/test_parity.py::test_parity_batch_helper_matches_single_call_loop -v
+      artifact: pytest exit code and captured failure diffs (stdout)
+    assumptions:
+      - proteon's batch primitives (batch_residue_sasa, batch_relative_sasa,
+        batch_atom_sasa, batch_dssp, batch_dihedrals, batch_hbond_count,
+        batch_compute_energy) produce per-structure results identical to
+        their single-call counterparts. proteon ships its own parity tests
+        for this contract.
+      - Strict mode only -- one bad PDB raises and discards the batch.
+        Tolerant batch loading is deferred to a future minor release.
+    failure_modes:
+      - A future proteon batch primitive drifts from its single-call sibling
+        in iteration order or rounding. Mitigation full-attribute-set
+        equality assertion in
+        test_parity_batch_helper_matches_single_call_loop.
+      - Mixing residue and atom-level graphs in one batch silently
+        propagates atom-only attributes to residue-level nodes (or vice
+        versa). Mitigation per-graph granularity detection plus the
+        full-attribute-set equality check on each graph in the batch.
+
 # Deferred claims are tracked separately so the validated manifest never
 # carries placeholder evidence (Validation Theater anti-pattern). Each entry
 # is promoted into `claims:` only once it has real oracle, tolerance, command,

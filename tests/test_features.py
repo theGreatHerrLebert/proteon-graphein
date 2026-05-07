@@ -8,7 +8,9 @@ import pytest
 
 from proteon_graphein import (
     add_proteon_features,
+    add_proteon_features_batch,
     compute_proteon_features,
+    compute_proteon_features_batch,
 )
 from proteon_graphein.features import _residue_key
 
@@ -284,6 +286,91 @@ def test_add_features_atom_level_skip_atom_features() -> None:
     assert "charge" not in sample
     assert "residue_sasa" in sample
     assert "dssp" in sample
+
+
+# ---------------------------------------------------------------------------
+# Batch helpers
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not TEST_PDB.exists(), reason="1crn.pdb fixture not available")
+def test_compute_features_batch_matches_serial() -> None:
+    """Batch feature dicts must equal a Python loop of single calls."""
+    paths = [TEST_PDB, TEST_PDB_HET, TEST_PDB]
+    batch = compute_proteon_features_batch(
+        paths, hbond_count=True, dihedrals=True, atom_sasa=True
+    )
+    serial = [
+        compute_proteon_features(p, hbond_count=True, dihedrals=True, atom_sasa=True)
+        for p in paths
+    ]
+    assert len(batch) == len(serial)
+    for b, s in zip(batch, serial):
+        # residue_sasa, rsa, atom_sasa exact float-equal
+        import numpy as np
+
+        np.testing.assert_array_equal(b["residue_sasa"], s["residue_sasa"])
+        np.testing.assert_array_equal(b["rsa"], s["rsa"])
+        np.testing.assert_array_equal(b["atom_sasa"], s["atom_sasa"])
+        np.testing.assert_array_equal(b["hbond_count"], s["hbond_count"])
+        np.testing.assert_array_equal(b["phi"], s["phi"])
+        np.testing.assert_array_equal(b["psi"], s["psi"])
+        np.testing.assert_array_equal(b["omega"], s["omega"])
+        # DSSP string equality
+        assert b["dssp"] == s["dssp"]
+        # Energy: same keys, same values
+        assert set(b["energy"].keys()) == set(s["energy"].keys())
+        for k in b["energy"]:
+            assert b["energy"][k] == s["energy"][k], f"energy[{k}] mismatch"
+
+
+@pytest.mark.skipif(not TEST_PDB.exists(), reason="1crn.pdb fixture not available")
+def test_add_features_batch_empty() -> None:
+    """Empty input yields empty output, no error."""
+    out = add_proteon_features_batch([], [])
+    assert out == []
+
+
+def test_add_features_batch_length_mismatch_raises() -> None:
+    """len(graphs) must equal len(pdb_paths)."""
+    pytest.importorskip("graphein")
+    import networkx as nx
+
+    with pytest.raises(ValueError, match="does not match"):
+        add_proteon_features_batch([nx.Graph()], [TEST_PDB, TEST_PDB])
+
+
+@pytest.mark.skipif(not TEST_PDB.exists(), reason="1crn.pdb fixture not available")
+def test_add_features_batch_mixed_granularity() -> None:
+    """A residue-level and an atom-level graph in one batch both get the right features."""
+    pytest.importorskip("graphein")
+    import graphein.protein as gp
+    from graphein.protein.config import ProteinGraphConfig
+
+    g_res = gp.construct_graph(config=ProteinGraphConfig(), path=str(TEST_PDB))
+    g_atom = gp.construct_graph(
+        config=ProteinGraphConfig(granularity="atom"), path=str(TEST_PDB)
+    )
+
+    add_proteon_features_batch(
+        [g_res, g_atom],
+        [TEST_PDB, TEST_PDB],
+        hbond_count=True,
+        dihedrals=True,
+    )
+
+    res_sample = next(iter(g_res.nodes(data=True)))[1]
+    atom_sample = next(iter(g_atom.nodes(data=True)))[1]
+
+    # residue-level graph: no atom-only attrs
+    for atom_only in ("atom_sasa", "charge", "is_backbone", "hetero"):
+        assert atom_only not in res_sample
+    # both have residue features
+    assert "residue_sasa" in res_sample and "residue_sasa" in atom_sample
+    assert "dssp" in res_sample and "dssp" in atom_sample
+    # atom-level graph also has per-atom features
+    assert "atom_sasa" in atom_sample
+    assert "charge" in atom_sample
 
 
 @pytest.mark.skipif(not TEST_PDB.exists(), reason="1crn.pdb fixture not available")

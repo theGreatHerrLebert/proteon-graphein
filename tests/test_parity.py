@@ -22,7 +22,11 @@ from pathlib import Path
 
 import pytest
 
-from proteon_graphein import add_proteon_features, compute_proteon_features
+from proteon_graphein import (
+    add_proteon_features,
+    add_proteon_features_batch,
+    compute_proteon_features,
+)
 from proteon_graphein.features import _atom_key, _residue_key
 
 TEST_PDB = Path("/scratch/TMAlign/proteon/test-pdbs/1crn.pdb")
@@ -263,6 +267,63 @@ def test_parity_atom_level_features_match_direct_proteon_call() -> None:
     assert n_broadcast_hbond > 0, "no atoms received broadcast hbond_count"
     for name, count in n_dihedral.items():
         assert count > 0, f"no atoms received broadcast {name}"
+
+
+@pytest.mark.skipif(not TEST_PDB.exists(), reason="1crn.pdb fixture not available")
+def test_parity_batch_helper_matches_single_call_loop() -> None:
+    """add_proteon_features_batch(graphs, paths)[i] must be exact-equal to
+    add_proteon_features(graphs[i], paths[i]).
+
+    Covers a heterogeneous batch (residue, atom, residue) and verifies every
+    node and graph attribute matches the single-call result exactly.
+    """
+    paths = [TEST_PDB, TEST_PDB_HET, TEST_PDB]
+    granularities = ["residue", "atom", "residue"]
+
+    batch_graphs = []
+    serial_graphs = []
+    for path, gr in zip(paths, granularities):
+        g_kind = "atom" if gr == "atom" else None
+        batch_graphs.append(_build_graph(path, granularity=g_kind))
+        serial_graphs.append(_build_graph(path, granularity=g_kind))
+
+    add_proteon_features_batch(
+        batch_graphs, paths, hbond_count=True, dihedrals=True
+    )
+    for g, p in zip(serial_graphs, paths):
+        add_proteon_features(g, p, hbond_count=True, dihedrals=True)
+
+    for idx, (b, s) in enumerate(zip(batch_graphs, serial_graphs)):
+        # Graph-level attributes
+        assert b.graph.get("proteon_ff") == s.graph.get("proteon_ff"), (
+            f"graph[{idx}] ff differs"
+        )
+        be, se = b.graph.get("proteon_energy"), s.graph.get("proteon_energy")
+        assert set(be.keys()) == set(se.keys()), f"graph[{idx}] energy keys differ"
+        for k in be:
+            assert be[k] == se[k], (
+                f"graph[{idx}] energy[{k}] differs: batch={be[k]!r} single={se[k]!r}"
+            )
+        # Node-level: same node-id set, same attribute dict per node
+        assert set(b.nodes) == set(s.nodes), f"graph[{idx}] node sets differ"
+        for node_id in b.nodes:
+            b_attrs = dict(b.nodes[node_id])
+            s_attrs = dict(s.nodes[node_id])
+            assert set(b_attrs.keys()) == set(s_attrs.keys()), (
+                f"graph[{idx}] node {node_id} attr keys differ: "
+                f"batch={sorted(b_attrs)} single={sorted(s_attrs)}"
+            )
+            for k in b_attrs:
+                if hasattr(b_attrs[k], "__len__") and not isinstance(b_attrs[k], str):
+                    # numpy / array-like attrs (none expected on nodes today,
+                    # but be safe).
+                    import numpy as np
+                    np.testing.assert_array_equal(b_attrs[k], s_attrs[k])
+                else:
+                    assert b_attrs[k] == s_attrs[k], (
+                        f"graph[{idx}] node {node_id} attr {k} differs: "
+                        f"batch={b_attrs[k]!r} single={s_attrs[k]!r}"
+                    )
 
 
 @pytest.mark.skipif(not TEST_PDB_HET.exists(), reason="1ake.pdb fixture not available")
